@@ -1,0 +1,122 @@
+menu "SmartRollerBlinds Configuration"
+    config DEVICE_NAME
+        string "Device name"
+        default "SRB"
+        help
+            Name of the device which will advertise over BLE.
+
+    menu "GPIO Configuration"
+        config PIN_MOTOR_A
+        int "Motor A Pin"
+        default 6
+        help
+            Pin number for Motor A control.
+        
+        config PIN_MOTOR_B
+        int "Motor B Pin"
+        default 5
+        help
+            Pin number for Motor B control.
+
+        config PIN_MOTOR_HA
+        int "Motor Hall Encoder A Pin"
+        default 3
+        help
+            Pin number for Motor Hall Encoder A.
+        
+        config PIN_MOTOR_HB
+        int "Motor Hall Encoder B Pin"
+        default 19
+        help
+            Pin number for Motor Hall Encoder B.
+
+        config PIN_MOTOR_SENSE
+        int "Motor Sensor Pin"
+        default 4
+        help
+            Pin number for Motor current sensing.
+
+        config PIN_BUTTON_UP
+        int "Button Up Pin"
+        default 10
+        help
+            Pin number for the Up button.
+
+        config PIN_BUTTON_DOWN
+        int "Button Down Pin"
+        default 8
+        help
+            Pin number for the Down button.
+
+        config PIN_LED
+        int "LED Pin"
+        default 2
+        help
+            Pin number for the LED indicator.
+    endmenu
+
+    menu "Motor Configuration"
+        config DEFAULT_MOVE_SPEED
+            int "Default Motor Move Speed"
+            default 100
+            help
+                Default speed for motor movements.
+        
+        config MOTOR_PID_KP
+            string "PID Kp Gain"
+            default "0.6"
+            help
+                Proportional gain for the motor PID controller.
+
+        config MOTOR_PID_KI
+            string "PID Ki Gain"
+            default "0.01"
+            help
+                Integral gain for the motor PID controller.
+
+        config MOTOR_PID_KD
+            string "PID Kd Gain"
+            default "10.0"
+            help
+                Derivative gain for the motor PID controller.
+
+        config CALIBRATION_OVERRUN_PULSES
+            int "Calibration Overrun Pulses"
+            default 50000
+            help
+                Number of pulses to move past the endstop during calibration.
+
+        config HOMING_OVERRUN_PULSES
+            int "Homing Overrun Pulses"
+            default 1000
+            help
+                Number of pulses to move past the zero point during homing.
+
+        config PID_FAILURE_TIMEOUT_MS
+            int "PID Failure Timeout (ms)"
+            default 60000
+            help
+                Time in milliseconds before a PID movement times out.
+
+        config POSITION_DEADBAND
+            int "Position Deadband"
+            default 5
+            help
+                The acceptable error range around the target position.
+    endmenu
+
+    menu "Button Configuration"
+        config BUTTON_LONG_PRESS_TIME_MS
+            int "Button Long Press Time (ms)"
+            default 2000
+            help
+                Time in milliseconds for a long press to be detected.
+
+        config BUTTON_SHORT_PRESS_TIME_MS
+            int "Button Short Press Time (ms)"
+            default 200
+            help
+                Time in milliseconds for a short press to be detected.
+    endmenu
+
+endmenu

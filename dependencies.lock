@@ -1,0 +1,46 @@
+dependencies:
+  espressif/button:
+    component_hash: f53face2ab21fa0ffaf4cf0f6e513d393f56df6586bb2ad1146120f03f19ee05
+    dependencies:
+    - name: espressif/cmake_utilities
+      registry_url: https://components.espressif.com
+      require: private
+      version: '*'
+    - name: idf
+      require: private
+      version: '>=4.0'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 4.1.3
+  espressif/cmake_utilities:
+    component_hash: 05165f30922b422b4b90c08845e6d449329b97370fbd06309803d8cb539d79e3
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=4.1'
+    source:
+      registry_url: https://components.espressif.com
+      type: service
+    version: 1.1.1
+  espressif/pid_ctrl:
+    component_hash: 22af0226d7adbea821e4c1a8c1fa5dad23c883eb7457e95e19342883a37c44a3
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=4.4'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 0.2.0
+  idf:
+    source:
+      type: idf
+    version: 5.4.2
+direct_dependencies:
+- espressif/button
+- espressif/pid_ctrl
+- idf
+manifest_hash: 64f5bc6f832aa708a603d7b7af16ddca5d9d8aca11f80e7a3be84e050d12cb26
+target: esp32c3
+version: 2.0.0
