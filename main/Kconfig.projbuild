@@ -48,11 +48,25 @@ menu "SmartRollerBlinds Configuration"
         help
             Pin number for the Down button.
 
+        config PIN_BUTTON_BOOT
+        int "Boot Button Pin"
+        default 9
+        help
+            Pin number for the Boot button (used for WiFi reset).
+
         config PIN_LED
         int "LED Pin"
         default 2
         help
             Pin number for the LED indicator.
+    endmenu
+
+    menu "Button Configuration"
+        config BUTTON_DOUBLE_CLICK_STEPS
+            int "Double-click Move Steps"
+            default 1500
+            help
+                Number of steps the motor moves on a double-click of the up/down buttons.
     endmenu
 
     menu "Motor Configuration"
@@ -105,18 +119,11 @@ menu "SmartRollerBlinds Configuration"
                 The acceptable error range around the target position.
     endmenu
 
-    menu "Button Configuration"
-        config BUTTON_LONG_PRESS_TIME_MS
-            int "Button Long Press Time (ms)"
-            default 2000
+    menu "MQTT Configuration"
+        config MQTT_STATUS_UPDATE_INTERVAL_MS
+            int "MQTT Status Update Interval (ms)"
+            default 500
             help
-                Time in milliseconds for a long press to be detected.
-
-        config BUTTON_SHORT_PRESS_TIME_MS
-            int "Button Short Press Time (ms)"
-            default 200
-            help
-                Time in milliseconds for a short press to be detected.
+                Time interval in milliseconds to throttle MQTT status updates during motor movement.
     endmenu
-
 endmenu

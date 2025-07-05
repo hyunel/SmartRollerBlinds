@@ -2,8 +2,11 @@
 #define _MOTOR_H_
 
 #include "esp_err.h"
+#include "esp_event.h"
 #include <stdbool.h>
 #include <stdint.h>
+
+ESP_EVENT_DECLARE_BASE(MOTOR_EVENTS);
 
 /**
  * @brief Opaque handle to a motor instance.
@@ -20,6 +23,14 @@ typedef enum {
     MOTOR_STATE_HOMING,       /*!< Motor is moving to the zero position to re-synchronize */
     MOTOR_STATE_ERROR,        /*!< Motor has encountered an error (e.g., PID failed to reach target) */
 } motor_state_t;
+
+/**
+ * @brief Motor event IDs
+ */
+typedef enum {
+    MOTOR_EVENT_STATE_CHANGED, /*!< Motor state has changed. Event data is a pointer to motor_state_t */
+} motor_event_t;
+
 
 /**
  * @brief Creates and initializes a new motor control instance.
@@ -112,5 +123,30 @@ bool motor_is_calibrated(motor_handle_t handle);
  * @return ESP_OK on success, or an error code on failure.
  */
 esp_err_t motor_update_pid_params(motor_handle_t handle, float kp, float ki, float kd);
+
+/**
+ * @brief Sets the motor's current position as the fully closed position.
+ *
+ * This defines the maximum travel distance for the blinds and is required for
+ * percentage-based control. The value is saved to NVS.
+ *
+ * @param handle The handle to the motor instance.
+ * @return ESP_OK on success, or an error code on failure.
+ */
+esp_err_t motor_set_fully_closed_position(motor_handle_t handle);
+
+/**
+ * @brief Sends a command to move the motor to a specific percentage of its total travel.
+ *
+ * 0% is fully open (position 0), and 100% is fully closed.
+ * Requires `motor_set_fully_closed_position` to have been called previously to define the travel range.
+ *
+ * @param handle The handle to the motor instance.
+ * @param percentage The target percentage (0-100).
+ * @param max_speed_pps The maximum speed for the movement.
+ * @return ESP_OK if the command was successfully sent.
+ */
+esp_err_t motor_go_to_percentage(motor_handle_t handle, uint8_t percentage, float max_speed_pps);
+
 
 #endif // _MOTOR_H_

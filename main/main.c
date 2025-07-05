@@ -9,7 +9,11 @@
 #include "nvs_flash.h"
 #include "modules/motor.h"
 #include "modules/button.h"
+#include "modules/led_control.h"
+#include "modules/wifi_manager.h"
+#include "modules/dns_server.h"
 #include "sdkconfig.h"
+#include "esp_wifi.h"
 
 #define TAG "MAIN"
 #define UART_NUM UART_NUM_0
@@ -181,12 +185,29 @@ void app_main(void)
     }
     ESP_ERROR_CHECK(ret);
 
+    // Initialize the event loop
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
+
     // Initialize Motor
     ESP_ERROR_CHECK(motor_init(&main_motor_handle));
 
     // Initialize Buttons
     button_module_init(main_motor_handle);
 
+    // Initialize LED
+    led_control_init();
+
     // Start the console task
     xTaskCreate(uart_task, "uart_task", TASK_STACK_SIZE * 2, NULL, 10, NULL);
+
+    // Initialize WiFi Manager
+    ESP_ERROR_CHECK(wifi_manager_init(main_motor_handle));
+
+    // Start DNS server if in AP mode
+    wifi_mode_t mode;
+    esp_wifi_get_mode(&mode);
+    if (mode == WIFI_MODE_AP || mode == WIFI_MODE_APSTA) {
+        dns_server_config_t config = DNS_SERVER_CONFIG_SINGLE("*" /* all A queries */, "WIFI_AP_DEF" /* softAP netif ID */);
+        start_dns_server(&config);
+    }
 }
