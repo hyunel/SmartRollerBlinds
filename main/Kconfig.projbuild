@@ -38,13 +38,13 @@ menu "SmartRollerBlinds Configuration"
 
         config PIN_BUTTON_UP
         int "Button Up Pin"
-        default 10
+        default 8
         help
             Pin number for the Up button.
 
         config PIN_BUTTON_DOWN
         int "Button Down Pin"
-        default 8
+        default 10
         help
             Pin number for the Down button.
 
@@ -64,7 +64,7 @@ menu "SmartRollerBlinds Configuration"
     menu "Button Configuration"
         config BUTTON_DOUBLE_CLICK_STEPS
             int "Double-click Move Steps"
-            default 1500
+            default 5000
             help
                 Number of steps the motor moves on a double-click of the up/down buttons.
     endmenu
@@ -108,7 +108,7 @@ menu "SmartRollerBlinds Configuration"
 
         config PID_FAILURE_TIMEOUT_MS
             int "PID Failure Timeout (ms)"
-            default 60000
+            default 600000
             help
                 Time in milliseconds before a PID movement times out.
 
@@ -117,6 +117,12 @@ menu "SmartRollerBlinds Configuration"
             default 5
             help
                 The acceptable error range around the target position.
+
+        config MOTOR_REVERSE_DIRECTION
+            bool "Reverse Motor Direction"
+            default true
+            help
+                Set to true to reverse the motor's direction of rotation.
     endmenu
 
     menu "MQTT Configuration"

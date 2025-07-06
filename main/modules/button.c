@@ -20,46 +20,74 @@ static motor_handle_t s_motor_handle;
 // --- Button Callbacks ---
 
 static void button_up_long_press_cb(void *arg, void *usr_data) {
-    ESP_LOGI(TAG, "UP BUTTON: Long Press - Starting Calibration");
+    ESP_LOGI(TAG, "UP BUTTON: Long Press - Start moving up for calibration.");
     if (s_motor_handle) {
-        motor_calibrate(s_motor_handle, CONFIG_DEFAULT_MOVE_SPEED);
+        motor_start_calibration(s_motor_handle, true, CONFIG_DEFAULT_MOVE_SPEED);
     }
 }
 
 static void button_up_single_click_cb(void *arg, void *usr_data) {
-    ESP_LOGI(TAG, "UP BUTTON: Single Click - Go to Zero");
+    ESP_LOGI(TAG, "UP BUTTON: Single Click");
     if (s_motor_handle) {
-        motor_go_to_zero(s_motor_handle, CONFIG_DEFAULT_MOVE_SPEED);
+        motor_state_t current_state = motor_get_state(s_motor_handle);
+        motor_direction_t current_direction = motor_get_direction(s_motor_handle);
+
+        if (current_direction == MOTOR_DIRECTION_UP) {
+            ESP_LOGI(TAG, "Motor is already moving up. No action.");
+            return;
+        }
+
+        if (current_state == MOTOR_STATE_MOVING) {
+            motor_stop(s_motor_handle);
+        } else if (current_state == MOTOR_STATE_CALIBRATING) {
+            motor_stop(s_motor_handle);
+        } else {
+            ESP_LOGI(TAG, "Go to Zero");
+            motor_set_target(s_motor_handle, 0, 0);
+        }
     }
 }
 
 static void button_up_double_click_cb(void *arg, void *usr_data) {
     ESP_LOGI(TAG, "UP BUTTON: Double Click - Move Up %d steps", CONFIG_BUTTON_DOUBLE_CLICK_STEPS);
     if (s_motor_handle) {
-        int32_t current_pos = motor_get_position(s_motor_handle);
-        motor_set_target(s_motor_handle, MAX(current_pos - CONFIG_BUTTON_DOUBLE_CLICK_STEPS, 0), CONFIG_DEFAULT_MOVE_SPEED);
+        motor_move_relative(s_motor_handle, -CONFIG_BUTTON_DOUBLE_CLICK_STEPS, 0);
     }
 }
 
 static void button_down_long_press_cb(void *arg, void *usr_data) {
-    ESP_LOGI(TAG, "DOWN BUTTON: Long Press - Set fully closed position");
+    ESP_LOGI(TAG, "DOWN BUTTON: Long Press - Start moving down for calibration.");
     if (s_motor_handle) {
-        motor_set_fully_closed_position(s_motor_handle);
+        motor_start_calibration(s_motor_handle, false, CONFIG_DEFAULT_MOVE_SPEED);
     }
 }
 
 static void button_down_single_click_cb(void *arg, void *usr_data) {
-    ESP_LOGI(TAG, "DOWN BUTTON: Single Click - Move to 100%% (fully closed)");
+    ESP_LOGI(TAG, "DOWN BUTTON: Single Click");
     if (s_motor_handle) {
-        motor_go_to_percentage(s_motor_handle, 100, CONFIG_DEFAULT_MOVE_SPEED);
+        motor_state_t current_state = motor_get_state(s_motor_handle);
+        motor_direction_t current_direction = motor_get_direction(s_motor_handle);
+
+        if (current_direction == MOTOR_DIRECTION_DOWN) {
+            ESP_LOGI(TAG, "Motor is already moving down. No action.");
+            return;
+        }
+
+        if (current_state == MOTOR_STATE_MOVING) {
+            motor_stop(s_motor_handle);
+        } else if (current_state == MOTOR_STATE_CALIBRATING) {
+            motor_stop(s_motor_handle);
+        } else {
+            ESP_LOGI(TAG, "Move to 100%% (fully closed)");
+            motor_go_to_percentage(s_motor_handle, 100, 0);
+        }
     }
 }
 
 static void button_down_double_click_cb(void *arg, void *usr_data) {
     ESP_LOGI(TAG, "DOWN BUTTON: Double Click - Move Down %d steps", CONFIG_BUTTON_DOUBLE_CLICK_STEPS);
     if (s_motor_handle) {
-        int32_t current_pos = motor_get_position(s_motor_handle);
-        motor_set_target(s_motor_handle, current_pos + CONFIG_BUTTON_DOUBLE_CLICK_STEPS, CONFIG_DEFAULT_MOVE_SPEED);
+        motor_move_relative(s_motor_handle, CONFIG_BUTTON_DOUBLE_CLICK_STEPS, 0);
     }
 }
 

@@ -48,7 +48,6 @@ static void status_event_handler(void* arg, esp_event_base_t event_base,
             switch (new_state) {
                 case MOTOR_STATE_MOVING:
                 case MOTOR_STATE_CALIBRATING:
-                case MOTOR_STATE_HOMING:
                     // Motor is running
                     led_control_set_state(LED_STATE_BLINK_SLOW);
                     break;

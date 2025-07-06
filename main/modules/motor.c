@@ -4,6 +4,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
+#include "freertos/semphr.h"
 #include "driver/ledc.h"
 #include "driver/gpio.h"
 #include "pid_ctrl.h"
@@ -23,7 +24,7 @@ ESP_EVENT_DEFINE_BASE(MOTOR_EVENTS);
 #define LEDC_CHANNEL_A          LEDC_CHANNEL_0
 #define LEDC_CHANNEL_B          LEDC_CHANNEL_1
 #define LEDC_DUTY_RES           LEDC_TIMER_10_BIT
-#define LEDC_FREQUENCY          (5000)
+#define LEDC_FREQUENCY          (20000)
 
 #define PID_MAX_OUTPUT          100.0f
 #define PID_MIN_OUTPUT         -100.0f
@@ -32,6 +33,7 @@ ESP_EVENT_DEFINE_BASE(MOTOR_EVENTS);
 #define NVS_NAMESPACE           "motor"
 #define NVS_POSITION_KEY        "position"
 #define NVS_FULLY_CLOSED_KEY    "fully_closed"
+#define NVS_SPEED_KEY           "def_speed"
 
 #define MOTOR_CMD_QUEUE_LEN     10
 
@@ -39,8 +41,10 @@ ESP_EVENT_DEFINE_BASE(MOTOR_EVENTS);
 
 typedef enum {
     CMD_SET_TARGET,
-    CMD_CALIBRATE,
-    CMD_GO_TO_ZERO,
+    CMD_MOVE_RELATIVE,
+    CMD_STOP,
+    CMD_START_CALIBRATION_UP,
+    CMD_START_CALIBRATION_DOWN,
 } motor_command_type_t;
 
 typedef struct {
@@ -55,6 +59,7 @@ struct motor_control_t {
     pid_ctrl_parameter_t pid_params;
     QueueHandle_t cmd_queue;
     nvs_handle_t nvs_handle;
+    SemaphoreHandle_t lock;
 
     // Volatile state updated by ISR or multiple tasks
     volatile int32_t current_position;
@@ -63,8 +68,9 @@ struct motor_control_t {
     // State controlled by the PID task
     int32_t target_position;
     int32_t fully_closed_position;
-    float max_speed_pps;
+    float default_speed_pps;
     motor_state_t current_state;
+    motor_direction_t current_direction;
     bool is_calibrated;
 };
 
@@ -74,8 +80,7 @@ static esp_err_t motor_set_pwm_duty(float duty_percent);
 static void IRAM_ATTR hall_encoder_isr_handler(void* arg);
 static void process_command(motor_handle_t handle, const motor_command_t *cmd);
 static void motor_set_state(motor_handle_t handle, motor_state_t new_state);
-static esp_err_t motor_save_nvs_value(const char* key, int32_t value);
-static esp_err_t motor_load_nvs_value(const char* key, int32_t* value);
+static void motor_initiate_movement(motor_handle_t handle, int32_t target, float speed, motor_state_t state);
 
 // --- Public API Implementation ---
 
@@ -125,21 +130,50 @@ esp_err_t motor_init(motor_handle_t *motor_handle) {
         return ESP_ERR_NO_MEM;
     }
 
-    // State Init: Load from NVS
-    if (motor_load_nvs_value(NVS_POSITION_KEY, (int32_t*)&handle->current_position) == ESP_OK) {
-        ESP_LOGI(TAG, "Loaded position %" PRId32 " from NVS.", handle->current_position);
-        handle->target_position = handle->current_position;
-        handle->is_calibrated = true; // Assume calibrated if position is saved
-    } else {
-        ESP_LOGW(TAG, "Could not load position from NVS. Motor needs calibration.");
-        handle->is_calibrated = false;
+    // Software Init: Mutex for thread safety
+    handle->lock = xSemaphoreCreateMutex();
+    if (!handle->lock) {
+        ESP_LOGE(TAG, "Failed to create mutex");
+        vQueueDelete(handle->cmd_queue);
+        free(handle);
+        return ESP_ERR_NO_MEM;
     }
 
-    if (motor_load_nvs_value(NVS_FULLY_CLOSED_KEY, &handle->fully_closed_position) != ESP_OK) {
-        handle->fully_closed_position = 0; // Default to 0 if not found
-        ESP_LOGW(TAG, "Fully closed position not set. Percentage moves will not work.");
+    // State Init: Load from NVS
+    nvs_handle_t nvs_handle;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READONLY, &nvs_handle);
+    if (err == ESP_OK) {
+        if (nvs_get_i32(nvs_handle, NVS_POSITION_KEY, (int32_t*)&handle->current_position) == ESP_OK) {
+            ESP_LOGI(TAG, "Loaded position %" PRId32 " from NVS.", handle->current_position);
+            handle->target_position = handle->current_position;
+            handle->is_calibrated = true;
+        } else {
+            ESP_LOGW(TAG, "Could not load position from NVS. Motor needs calibration.");
+            handle->is_calibrated = false;
+        }
+
+        if (nvs_get_i32(nvs_handle, NVS_FULLY_CLOSED_KEY, &handle->fully_closed_position) == ESP_OK) {
+            ESP_LOGI(TAG, "Loaded fully closed position %" PRId32 " from NVS.", handle->fully_closed_position);
+        } else {
+            handle->fully_closed_position = 0;
+            ESP_LOGW(TAG, "Fully closed position not set. Percentage moves will not work.");
+        }
+
+        char speed_str[16] = {0};
+        size_t speed_len = sizeof(speed_str);
+        if (nvs_get_str(nvs_handle, NVS_SPEED_KEY, speed_str, &speed_len) == ESP_OK) {
+            handle->default_speed_pps = atof(speed_str);
+            ESP_LOGI(TAG, "Loaded default speed %.2f from NVS.", handle->default_speed_pps);
+        } else {
+            handle->default_speed_pps = CONFIG_DEFAULT_MOVE_SPEED;
+            ESP_LOGI(TAG, "Default speed not in NVS, using default %.2f.", handle->default_speed_pps);
+        }
+        nvs_close(nvs_handle);
     } else {
-        ESP_LOGI(TAG, "Loaded fully closed position %" PRId32 " from NVS.", handle->fully_closed_position);
+        ESP_LOGW(TAG, "Could not open NVS. Using default values.");
+        handle->is_calibrated = false;
+        handle->fully_closed_position = 0;
+        handle->default_speed_pps = CONFIG_DEFAULT_MOVE_SPEED;
     }
 
     motor_set_state(handle, MOTOR_STATE_IDLE);
@@ -152,29 +186,37 @@ esp_err_t motor_init(motor_handle_t *motor_handle) {
     return ESP_OK;
 }
 
-esp_err_t motor_calibrate(motor_handle_t handle, float max_speed_pps) {
+esp_err_t motor_start_calibration(motor_handle_t handle, bool move_up, float max_speed_pps) {
     if (!handle) return ESP_ERR_INVALID_ARG;
     motor_command_t cmd = {
-        .type = CMD_CALIBRATE,
+        .type = move_up ? CMD_START_CALIBRATION_UP : CMD_START_CALIBRATION_DOWN,
         .max_speed_pps = max_speed_pps
     };
     if (xQueueSend(handle->cmd_queue, &cmd, pdMS_TO_TICKS(100)) != pdPASS) {
-        ESP_LOGE(TAG, "Failed to send calibrate command to queue");
+        ESP_LOGE(TAG, "Failed to send start_calibration command to queue");
         return ESP_FAIL;
     }
     return ESP_OK;
 }
 
-esp_err_t motor_go_to_zero(motor_handle_t handle, float max_speed_pps) {
+esp_err_t motor_stop(motor_handle_t handle) {
     if (!handle) return ESP_ERR_INVALID_ARG;
-    motor_command_t cmd = {
-        .type = CMD_GO_TO_ZERO,
-        .max_speed_pps = max_speed_pps
-    };
+
+    // If the motor is already stopped, do nothing.
+    if (motor_get_state(handle) == MOTOR_STATE_IDLE) {
+        ESP_LOGI(TAG, "Motor is already idle, nothing to stop.");
+        return ESP_OK;
+    }
+
+    // For any active state (MOVING or CALIBRATING), just queue a generic STOP command.
+    // The logic to handle the context (e.g., setting calibration points) is in process_command.
+    ESP_LOGI(TAG, "Queueing stop command.");
+    motor_command_t cmd = { .type = CMD_STOP };
     if (xQueueSend(handle->cmd_queue, &cmd, pdMS_TO_TICKS(100)) != pdPASS) {
-        ESP_LOGE(TAG, "Failed to send go_to_zero command to queue");
+        ESP_LOGE(TAG, "Failed to send stop command to queue");
         return ESP_FAIL;
     }
+    
     return ESP_OK;
 }
 
@@ -192,111 +234,146 @@ esp_err_t motor_set_target(motor_handle_t handle, int32_t position, float max_sp
     return ESP_OK;
 }
 
-int32_t motor_get_position(motor_handle_t handle) {
-    return handle ? handle->current_position : 0;
-}
-
-int32_t motor_get_target_position(motor_handle_t handle) {
-    return handle ? handle->target_position : 0;
+void motor_get_position(motor_handle_t handle, int32_t *current_pos, int32_t *target_pos) {
+    if (!handle) {
+        if (current_pos) *current_pos = 0;
+        if (target_pos) *target_pos = 0;
+        return;
+    }
+    xSemaphoreTake(handle->lock, portMAX_DELAY);
+    if (current_pos) *current_pos = handle->current_position;
+    if (target_pos) *target_pos = handle->target_position;
+    xSemaphoreGive(handle->lock);
 }
 
 motor_state_t motor_get_state(motor_handle_t handle) {
-    return handle ? handle->current_state : MOTOR_STATE_ERROR;
+    if (!handle) return MOTOR_STATE_ERROR;
+    motor_state_t state;
+    xSemaphoreTake(handle->lock, portMAX_DELAY);
+    state = handle->current_state;
+    xSemaphoreGive(handle->lock);
+    return state;
+}
+
+motor_direction_t motor_get_direction(motor_handle_t handle) {
+    if (!handle) return MOTOR_DIRECTION_STOP;
+    motor_direction_t dir;
+    xSemaphoreTake(handle->lock, portMAX_DELAY);
+    dir = handle->current_direction;
+    xSemaphoreGive(handle->lock);
+    return dir;
 }
 
 bool motor_is_calibrated(motor_handle_t handle) {
-    return handle ? handle->is_calibrated : false;
+    if (!handle) return false;
+    bool calibrated;
+    xSemaphoreTake(handle->lock, portMAX_DELAY);
+    calibrated = handle->is_calibrated;
+    xSemaphoreGive(handle->lock);
+    return calibrated;
 }
 
 esp_err_t motor_update_pid_params(motor_handle_t handle, float kp, float ki, float kd) {
     if (!handle || !handle->pid_controller) {
         return ESP_ERR_INVALID_ARG;
     }
+    esp_err_t err;
+    xSemaphoreTake(handle->lock, portMAX_DELAY);
     handle->pid_params.kp = kp;
     handle->pid_params.ki = ki;
     handle->pid_params.kd = kd;
-    // Note: pid_update_parameters is the correct function from pid_ctrl.h
-    esp_err_t err = pid_update_parameters(handle->pid_controller, &handle->pid_params);
+    err = pid_update_parameters(handle->pid_controller, &handle->pid_params);
     if (err == ESP_OK) {
         ESP_LOGI(TAG, "Updated PID gains to: Kp=%.2f, Ki=%.2f, Kd=%.2f", kp, ki, kd);
     } else {
         ESP_LOGE(TAG, "Failed to update PID parameters");
     }
+    xSemaphoreGive(handle->lock);
     return err;
 }
 
 // --- Private Helper Functions ---
 
+/**
+ * @brief Configures PID parameters and sets the motor state to initiate a movement.
+ *
+ * @param handle Motor control handle.
+ * @param target The target position for the movement.
+ * @param speed The maximum speed for the movement (in pulses per second).
+ * @param state The new motor state (e.g., MOVING or CALIBRATING).
+ */
+static void motor_initiate_movement(motor_handle_t handle, int32_t target, float speed, motor_state_t state) {
+    ESP_LOGI(TAG, "CMD: Move %ld -> %ld, speed=%.2f, state=%d", handle->current_position, target, speed, state);
+    
+    // Reset PID controller for a new, distinct movement.
+    pid_reset_ctrl_block(handle->pid_controller);
+
+    // Update speed limits in the PID controller
+    handle->pid_params.max_output = fabsf(speed);
+    handle->pid_params.min_output = -fabsf(speed);
+    pid_update_parameters(handle->pid_controller, &handle->pid_params);
+    
+    handle->target_position = target;
+    motor_set_state(handle, state);
+}
+
+
 static void motor_pid_control_task(void *pvParameters) {
     motor_handle_t handle = (motor_handle_t)pvParameters;
     motor_command_t received_cmd;
-
     int64_t move_start_time_ms = 0;
 
     while (1) {
-        // 1. Check for incoming commands (non-blocking)
         if (xQueueReceive(handle->cmd_queue, &received_cmd, 0) == pdPASS) {
+            xSemaphoreTake(handle->lock, portMAX_DELAY);
             process_command(handle, &received_cmd);
-            move_start_time_ms = 0; // Reset timer on new command
+            move_start_time_ms = 0;
+            xSemaphoreGive(handle->lock);
         }
 
-        // 2. Update state machine
+        xSemaphoreTake(handle->lock, portMAX_DELAY);
         int64_t current_time_ms = esp_log_timestamp();
-        switch (handle->current_state) {
-            case MOTOR_STATE_IDLE:
-                break; // PID loop below will hold position
+        motor_state_t current_state = handle->current_state;
+        int32_t target_pos = handle->target_position;
+        int32_t current_pos = handle->current_position;
 
+        switch (current_state) {
+            case MOTOR_STATE_IDLE:
+                break;
             case MOTOR_STATE_MOVING:
             case MOTOR_STATE_CALIBRATING:
-            case MOTOR_STATE_HOMING:
                 if (move_start_time_ms == 0) move_start_time_ms = current_time_ms;
-
-                // Timeout check
                 if (current_time_ms - move_start_time_ms > CONFIG_PID_FAILURE_TIMEOUT_MS) {
-                    ESP_LOGE(TAG, "PID failure: Timed out in state %d", handle->current_state);
+                    ESP_LOGE(TAG, "PID failure: Timed out in state %d", current_state);
                     motor_set_state(handle, MOTOR_STATE_ERROR);
                     motor_set_pwm_duty(0);
-                    continue; // Skip PID calculation for this cycle
-                }
-
-                // Check for target reached
-                if (abs(handle->target_position - handle->current_position) <= CONFIG_POSITION_DEADBAND) {
-                    ESP_LOGI(TAG, "Movement finished. Final position: %" PRId32, handle->current_position);
-                    if (handle->current_state == MOTOR_STATE_CALIBRATING) {
-                        ESP_LOGI(TAG, "Calibration finished. Setting zero point.");
-                        handle->current_position = 0;
-                        handle->target_position = 0;
-                        handle->is_calibrated = true;
-                    } else if (handle->current_state == MOTOR_STATE_HOMING) {
-                        ESP_LOGI(TAG, "Homing finished. Resetting zero point.");
-                        handle->current_position = 0;
-                        handle->target_position = 0;
-                    }
+                } else if (current_state == MOTOR_STATE_MOVING && abs(target_pos - current_pos) <= CONFIG_POSITION_DEADBAND) {
+                    ESP_LOGI(TAG, "Movement finished. Final position: %" PRId32, current_pos);
                     motor_set_state(handle, MOTOR_STATE_IDLE);
-                    motor_save_nvs_value(NVS_POSITION_KEY, handle->current_position);
+                    nvs_handle_t nvs_handle;
+                    if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &nvs_handle) == ESP_OK) {
+                        nvs_set_i32(nvs_handle, NVS_POSITION_KEY, current_pos);
+                        nvs_commit(nvs_handle);
+                        nvs_close(nvs_handle);
+                    }
                 }
                 break;
-
             case MOTOR_STATE_ERROR:
+                xSemaphoreGive(handle->lock);
                 vTaskDelay(pdMS_TO_TICKS(100));
-                continue; // Skip PID calculation
+                continue;
         }
 
-        // 3. Core PID Calculation
-        float error = (float)(handle->target_position - handle->current_position);
+        float error = (float)(target_pos - current_pos);
         float pid_output;
         pid_compute(handle->pid_controller, error, &pid_output);
 
-        // Apply deadband to prevent noise and oscillation when holding position.
-        // If the motor is in IDLE state and the position error is within the deadband,
-        // force the output to zero. This stops the motor from making small, noisy
-        // adjustments when it's supposed to be stationary.
-        if (handle->current_state == MOTOR_STATE_IDLE && fabsf(error) <= CONFIG_POSITION_DEADBAND) {
+        if (current_state == MOTOR_STATE_IDLE && fabsf(error) <= CONFIG_POSITION_DEADBAND) {
             pid_output = 0;
         }
         
-        // 4. Apply motor power
         motor_set_pwm_duty(pid_output);
+        xSemaphoreGive(handle->lock);
         
         vTaskDelay(pdMS_TO_TICKS(PID_CONTROL_PERIOD_MS));
     }
@@ -304,7 +381,67 @@ static void motor_pid_control_task(void *pvParameters) {
 
 static void process_command(motor_handle_t handle, const motor_command_t *cmd) {
     switch (cmd->type) {
-        case CMD_SET_TARGET:
+        case CMD_MOVE_RELATIVE: {
+            if (!handle->is_calibrated) {
+                ESP_LOGE(TAG, "Cannot move relative, motor not calibrated.");
+                return;
+            }
+            if (handle->current_state == MOTOR_STATE_ERROR) {
+                ESP_LOGE(TAG, "Cannot move relative, motor is in an error state.");
+                return;
+            }
+            int32_t new_target = handle->current_position + cmd->position;
+            motor_command_t set_target_cmd = {
+                .type = CMD_SET_TARGET,
+                .position = new_target,
+                .max_speed_pps = cmd->max_speed_pps
+            };
+            process_command(handle, &set_target_cmd);
+            break;
+        }
+        case CMD_STOP:
+            // This command now handles stopping a regular move AND finishing a calibration move.
+            if (handle->current_state == MOTOR_STATE_CALIBRATING) {
+                if (handle->current_direction == MOTOR_DIRECTION_UP) {
+                    // Logic to set the zero point
+                    ESP_LOGI(TAG, "CMD: Setting zero point from calibration stop.");
+                    int32_t offset = handle->current_position;
+                    handle->current_position = 0;
+                    if (handle->fully_closed_position > 0) {
+                        handle->fully_closed_position -= offset;
+                    }
+                    handle->is_calibrated = true;
+                    ESP_LOGI(TAG, "New zero point set. Position offset by %" PRId32, -offset);
+                    
+                    nvs_handle_t nvs_handle;
+                    if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &nvs_handle) == ESP_OK) {
+                        nvs_set_i32(nvs_handle, NVS_POSITION_KEY, handle->current_position);
+                        nvs_set_i32(nvs_handle, NVS_FULLY_CLOSED_KEY, handle->fully_closed_position);
+                        nvs_commit(nvs_handle);
+                        nvs_close(nvs_handle);
+                    }
+                } else if (handle->current_direction == MOTOR_DIRECTION_DOWN) {
+                    // Logic to set the fully closed point
+                    ESP_LOGI(TAG, "CMD: Setting fully closed point from calibration stop.");
+                    handle->fully_closed_position = handle->current_position;
+                    ESP_LOGI(TAG, "New fully closed position set to %" PRId32, handle->fully_closed_position);
+                    nvs_handle_t nvs_handle_closed;
+                    if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &nvs_handle_closed) == ESP_OK) {
+                        nvs_set_i32(nvs_handle_closed, NVS_FULLY_CLOSED_KEY, handle->fully_closed_position);
+                        nvs_commit(nvs_handle_closed);
+                        nvs_close(nvs_handle_closed);
+                    }
+                }
+            }
+            
+            // For all stop scenarios, set target to current position and go to IDLE.
+            handle->target_position = handle->current_position;
+            pid_reset_ctrl_block(handle->pid_controller);
+            
+            motor_set_state(handle, MOTOR_STATE_IDLE);
+            ESP_LOGI(TAG, "CMD: Motor stopped at position %" PRId32, handle->current_position);
+            break;
+        case CMD_SET_TARGET: {
             if (!handle->is_calibrated) {
                 ESP_LOGE(TAG, "Cannot set target, motor not calibrated.");
                 return;
@@ -313,55 +450,21 @@ static void process_command(motor_handle_t handle, const motor_command_t *cmd) {
                 ESP_LOGE(TAG, "Cannot set target, motor is in an error state.");
                 return;
             }
-
             int32_t new_target = cmd->position;
-            // Constrain target to valid range if fully_closed_position is set
             if (handle->fully_closed_position > 0) {
-                if (new_target < 0) new_target = 0;
-                if (new_target > handle->fully_closed_position) new_target = handle->fully_closed_position;
+                new_target = fmaxf(0, fminf(new_target, handle->fully_closed_position));
             }
-
-
-            ESP_LOGI(TAG, "CMD: Set target=%" PRId32 " (constrained to %" PRId32 "), speed=%.2f", cmd->position, new_target, cmd->max_speed_pps);
-
-            // Update the speed limit in the PID controller
-            handle->max_speed_pps = fabsf(cmd->max_speed_pps);
-            handle->pid_params.max_output = handle->max_speed_pps;
-            handle->pid_params.min_output = -handle->max_speed_pps;
-            pid_update_parameters(handle->pid_controller, &handle->pid_params);
-
-            pid_reset_ctrl_block(handle->pid_controller); // Reset PID before a new move
-            handle->target_position = new_target;
-            motor_set_state(handle, MOTOR_STATE_MOVING);
+            float speed_to_use = (cmd->max_speed_pps > 0) ? cmd->max_speed_pps : handle->default_speed_pps;
+            motor_initiate_movement(handle, new_target, speed_to_use, MOTOR_STATE_MOVING);
             break;
-
-        case CMD_CALIBRATE:
+        }
+        case CMD_START_CALIBRATION_UP:
             if (handle->current_state == MOTOR_STATE_ERROR) return;
-            ESP_LOGI(TAG, "CMD: Calibrate, speed=%.2f", cmd->max_speed_pps);
-            handle->is_calibrated = false;
-            pid_reset_ctrl_block(handle->pid_controller);
-            handle->max_speed_pps = fabsf(cmd->max_speed_pps);
-            handle->pid_params.max_output = handle->max_speed_pps;
-            handle->pid_params.min_output = -handle->max_speed_pps;
-            pid_update_parameters(handle->pid_controller, &handle->pid_params);
-            handle->target_position = handle->current_position - CONFIG_CALIBRATION_OVERRUN_PULSES; // Move up
-            motor_set_state(handle, MOTOR_STATE_CALIBRATING);
+            motor_initiate_movement(handle, -2000000000, cmd->max_speed_pps, MOTOR_STATE_CALIBRATING);
             break;
-
-        case CMD_GO_TO_ZERO:
-            if (!handle->is_calibrated) {
-                ESP_LOGE(TAG, "Cannot go to zero, motor not calibrated.");
-                return;
-            }
+        case CMD_START_CALIBRATION_DOWN:
             if (handle->current_state == MOTOR_STATE_ERROR) return;
-            ESP_LOGI(TAG, "CMD: Go to zero, speed=%.2f", cmd->max_speed_pps);
-            pid_reset_ctrl_block(handle->pid_controller);
-            handle->max_speed_pps = fabsf(cmd->max_speed_pps);
-            handle->pid_params.max_output = handle->max_speed_pps;
-            handle->pid_params.min_output = -handle->max_speed_pps;
-            pid_update_parameters(handle->pid_controller, &handle->pid_params);
-            handle->target_position = 0 - CONFIG_HOMING_OVERRUN_PULSES; // Move to zero plus overrun
-            motor_set_state(handle, MOTOR_STATE_HOMING);
+            motor_initiate_movement(handle, 2000000000, cmd->max_speed_pps, MOTOR_STATE_CALIBRATING);
             break;
     }
 }
@@ -369,13 +472,19 @@ static void process_command(motor_handle_t handle, const motor_command_t *cmd) {
 static esp_err_t motor_set_pwm_duty(float duty_percent) {
     duty_percent = fmaxf(PID_MIN_OUTPUT, fminf(PID_MAX_OUTPUT, duty_percent));
     uint32_t duty_val = (uint32_t)(fabsf(duty_percent) / 100.0f * (1 << LEDC_DUTY_RES));
-    
-    if (duty_percent > 0) { // Move down
+
+    bool move_down = (duty_percent > 0);
+
+#if CONFIG_MOTOR_REVERSE_DIRECTION
+    move_down = !move_down;
+#endif
+
+    if (move_down) {
         ledc_set_duty(LEDC_MODE, LEDC_CHANNEL_A, 0);
         ledc_update_duty(LEDC_MODE, LEDC_CHANNEL_A);
         ledc_set_duty(LEDC_MODE, LEDC_CHANNEL_B, duty_val);
         ledc_update_duty(LEDC_MODE, LEDC_CHANNEL_B);
-    } else { // Move up
+    } else { // Move up or stop
         ledc_set_duty(LEDC_MODE, LEDC_CHANNEL_B, 0);
         ledc_update_duty(LEDC_MODE, LEDC_CHANNEL_B);
         ledc_set_duty(LEDC_MODE, LEDC_CHANNEL_A, duty_val);
@@ -391,6 +500,10 @@ static void hall_encoder_isr_handler(void* arg) {
     uint8_t current_state = (hall_a << 1) | hall_b;
     static const int8_t QEM[16] = {0, -1, 1, 2, 1, 0, 2, -1, -1, 2, 0, 1, 2, 1, -1, 0};
     int8_t transition = QEM[(handle->last_hall_state << 2) | current_state];
+
+#if CONFIG_MOTOR_REVERSE_DIRECTION
+    transition = -transition;
+#endif
     
     if (transition == 1) {
         handle->current_position++;
@@ -402,64 +515,114 @@ static void hall_encoder_isr_handler(void* arg) {
 }
 
 static void motor_set_state(motor_handle_t handle, motor_state_t new_state) {
+    // Determine direction based on the new state
+    motor_direction_t new_direction = MOTOR_DIRECTION_STOP;
+    if (new_state == MOTOR_STATE_MOVING || new_state == MOTOR_STATE_CALIBRATING) {
+        // Determine direction by comparing target to current position
+        if (handle->target_position > handle->current_position) {
+            new_direction = MOTOR_DIRECTION_DOWN;
+        } else if (handle->target_position < handle->current_position) {
+            new_direction = MOTOR_DIRECTION_UP;
+        }
+    }
+
+    // For IDLE or ERROR state, the direction is implicitly STOP.
+    if (handle->current_direction != new_direction) {
+        handle->current_direction = new_direction;
+        esp_event_post(MOTOR_EVENTS, MOTOR_EVENT_DIRECTION_CHANGED, &new_direction, sizeof(new_direction), pdMS_TO_TICKS(10));
+    }
+
     if (handle->current_state != new_state) {
         handle->current_state = new_state;
         esp_event_post(MOTOR_EVENTS, MOTOR_EVENT_STATE_CHANGED, &new_state, sizeof(new_state), pdMS_TO_TICKS(10));
     }
 }
 
-static esp_err_t motor_save_nvs_value(const char* key, int32_t value) {
-    nvs_handle_t nvs_handle;
-    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &nvs_handle);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Error (%s) opening NVS handle for writing!", esp_err_to_name(err));
-        return err;
-    }
-    err = nvs_set_i32(nvs_handle, key, value);
-    if (err == ESP_OK) {
-        err = nvs_commit(nvs_handle);
-        if (err != ESP_OK) {
-            ESP_LOGE(TAG, "NVS commit failed for key '%s'!", key);
-        }
-    } else {
-        ESP_LOGE(TAG, "Error (%s) writing key '%s' to NVS!", esp_err_to_name(err), key);
-    }
-    nvs_close(nvs_handle);
-    return err;
-}
-
-static esp_err_t motor_load_nvs_value(const char* key, int32_t* value) {
-    nvs_handle_t nvs_handle;
-    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READONLY, &nvs_handle);
-    if (err != ESP_OK) {
-        // This can happen on first boot, not necessarily an error.
-        return err;
-    }
-    err = nvs_get_i32(nvs_handle, key, value);
-    nvs_close(nvs_handle);
-    return err;
+int32_t motor_get_fully_closed_position(motor_handle_t handle) {
+    if (!handle) return 0;
+    int32_t pos;
+    xSemaphoreTake(handle->lock, portMAX_DELAY);
+    pos = handle->fully_closed_position;
+    xSemaphoreGive(handle->lock);
+    return pos;
 }
 
 // --- New Public API Functions ---
 
-esp_err_t motor_set_fully_closed_position(motor_handle_t handle) {
+esp_err_t motor_set_default_speed(motor_handle_t handle, float speed_pps) {
     if (!handle) return ESP_ERR_INVALID_ARG;
-    handle->fully_closed_position = handle->current_position;
-    ESP_LOGI(TAG, "New fully closed position set to %" PRId32, handle->fully_closed_position);
-    return motor_save_nvs_value(NVS_FULLY_CLOSED_KEY, handle->fully_closed_position);
+    if (speed_pps <= 0) return ESP_ERR_INVALID_ARG;
+
+    esp_err_t err = ESP_FAIL;
+    xSemaphoreTake(handle->lock, portMAX_DELAY);
+    handle->default_speed_pps = speed_pps;
+    ESP_LOGI(TAG, "Set default speed to %.2f pps", speed_pps);
+
+    nvs_handle_t nvs_handle;
+    err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &nvs_handle);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Error opening NVS for writing speed");
+    } else {
+        char speed_str[16];
+        snprintf(speed_str, sizeof(speed_str), "%.2f", speed_pps);
+        err = nvs_set_str(nvs_handle, NVS_SPEED_KEY, speed_str);
+        if (err == ESP_OK) {
+            nvs_commit(nvs_handle);
+        }
+        nvs_close(nvs_handle);
+    }
+    xSemaphoreGive(handle->lock);
+    return err;
+}
+
+float motor_get_default_speed(motor_handle_t handle) {
+    if (!handle) return 0.0f;
+    float speed;
+    xSemaphoreTake(handle->lock, portMAX_DELAY);
+    speed = handle->default_speed_pps;
+    xSemaphoreGive(handle->lock);
+    return speed;
 }
 
 esp_err_t motor_go_to_percentage(motor_handle_t handle, uint8_t percentage, float max_speed_pps) {
     if (!handle) return ESP_ERR_INVALID_ARG;
     if (percentage > 100) percentage = 100;
 
-    if (!handle->is_calibrated || handle->fully_closed_position <= 0) {
+    int32_t target_pos = 0;
+    bool is_calibrated = false;
+    int32_t fully_closed_pos = 0;
+
+    xSemaphoreTake(handle->lock, portMAX_DELAY);
+    is_calibrated = handle->is_calibrated;
+    fully_closed_pos = handle->fully_closed_position;
+    xSemaphoreGive(handle->lock);
+
+    if (!is_calibrated || fully_closed_pos <= 0) {
         ESP_LOGE(TAG, "Cannot go to percentage. Motor not calibrated or fully closed position not set.");
         return ESP_ERR_INVALID_STATE;
     }
 
-    int32_t target_pos = (int32_t)(((float)percentage / 100.0f) * handle->fully_closed_position);
+    target_pos = (int32_t)(((float)percentage / 100.0f) * fully_closed_pos);
     ESP_LOGI(TAG, "Moving to %d%%, which is position %" PRId32, percentage, target_pos);
 
     return motor_set_target(handle, target_pos, max_speed_pps);
+}
+
+esp_err_t motor_move_relative(motor_handle_t handle, int32_t delta, float max_speed_pps) {
+    if (!handle) return ESP_ERR_INVALID_ARG;
+
+    ESP_LOGI(TAG, "Queueing relative move by %" PRId32, delta);
+
+    motor_command_t cmd = {
+        .type = CMD_MOVE_RELATIVE,
+        .position = delta, // Use position field to store the delta
+        .max_speed_pps = max_speed_pps
+    };
+
+    if (xQueueSend(handle->cmd_queue, &cmd, pdMS_TO_TICKS(100)) != pdPASS) {
+        ESP_LOGE(TAG, "Failed to send relative_move command to queue");
+        return ESP_FAIL;
+    }
+
+    return ESP_OK;
 }

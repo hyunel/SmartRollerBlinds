@@ -12,6 +12,7 @@
 #include "modules/led_control.h"
 #include "modules/wifi_manager.h"
 #include "modules/dns_server.h"
+#include "modules/command_handler.h" // Add command handler
 #include "sdkconfig.h"
 #include "esp_wifi.h"
 
@@ -23,95 +24,16 @@
 static motor_handle_t main_motor_handle;
 
 static void process_command(char *cmd_line) {
-    char *cmd;
-    char *saveptr;
-
-    // Get the command which is the first word
-    cmd = strtok_r(cmd_line, " \n\r", &saveptr);
-
-    if (cmd == NULL) {
-        return; // Empty line
+    if (cmd_line == NULL || strlen(cmd_line) == 0) {
+        return;
     }
-
-    if (strcmp(cmd, "help") == 0) {
-        printf("Available commands:\n");
-        printf("  help - Show this message\n");
-        printf("  status - Get current motor status\n");
-        printf("  calibrate - Start motor calibration\n");
-        printf("  zero - Go to zero position to re-sync\n");
-        printf("  move <position> [speed] - Move motor to a specific position\n");
-        printf("  set_pid <kp> <ki> <kd> - Set PID gains\n");
-    } else if (strcmp(cmd, "status") == 0) {
-        if (main_motor_handle) {
-            int32_t pos = motor_get_position(main_motor_handle);
-            int32_t target_pos = motor_get_target_position(main_motor_handle);
-            motor_state_t state = motor_get_state(main_motor_handle);
-            bool calibrated = motor_is_calibrated(main_motor_handle);
-            const char* state_str = "Unknown";
-            switch(state) {
-                case MOTOR_STATE_IDLE: state_str = "Idle"; break;
-                case MOTOR_STATE_MOVING: state_str = "Moving"; break;
-                case MOTOR_STATE_CALIBRATING: state_str = "Calibrating"; break;
-                case MOTOR_STATE_HOMING: state_str = "Homing"; break;
-                case MOTOR_STATE_ERROR: state_str = "Error"; break;
-            }
-            // Log with ESP_LOGI for standardized output format
-            printf("Pos:%" PRIi32 " -> Tar:%" PRIi32 ", State:%s, Calib:%s\n", pos, target_pos, state_str, calibrated ? "Y" : "N");
-        } else {
-            ESP_LOGE(TAG, "Motor not initialized!");
-        }
-    } else if (strcmp(cmd, "calibrate") == 0) {
-        if (main_motor_handle) {
-            motor_calibrate(main_motor_handle, 100.0f);
-            printf("Calibration command sent.\n");
-        } else {
-            ESP_LOGE(TAG, "Motor not initialized!");
-        }
-    } else if (strcmp(cmd, "zero") == 0) {
-        if (main_motor_handle) {
-            motor_go_to_zero(main_motor_handle, 100.0f);
-            printf("Go to zero command sent.\n");
-        } else {
-            ESP_LOGE(TAG, "Motor not initialized!");
-        }
-    } else if (strcmp(cmd, "move") == 0) {
-        char *pos_str = strtok_r(NULL, " \n\r", &saveptr);
-        char *speed_str = strtok_r(NULL, " \n\r", &saveptr); // Optional speed
-        if (pos_str) {
-            int32_t position = atoi(pos_str);
-            float speed = CONFIG_DEFAULT_MOVE_SPEED;
-            if (speed_str) {
-                speed = atof(speed_str);
-            }
-            if (main_motor_handle) {
-                motor_set_target(main_motor_handle, position, speed);
-                printf("Move command sent to pos %" PRIi32 " with speed %.2f.\n", position, speed);
-            } else {
-                ESP_LOGE(TAG, "Motor not initialized!");
-            }
-        } else {
-            printf("Error: 'move' command requires a position argument.\n");
-        }
-    } else if (strcmp(cmd, "set_pid") == 0) {
-        char *kp_str = strtok_r(NULL, " \n\r", &saveptr);
-        char *ki_str = strtok_r(NULL, " \n\r", &saveptr);
-        char *kd_str = strtok_r(NULL, " \n\r", &saveptr);
-
-        if (kp_str && ki_str && kd_str) {
-            float kp = atof(kp_str);
-            float ki = atof(ki_str);
-            float kd = atof(kd_str);
-            if (main_motor_handle) {
-                motor_update_pid_params(main_motor_handle, kp, ki, kd);
-                printf("PID params updated: Kp=%.2f, Ki=%.2f, Kd=%.2f\n", kp, ki, kd);
-            } else {
-                ESP_LOGE(TAG, "Motor not initialized!");
-            }
-        } else {
-            printf("Error: 'set_pid' requires kp, ki, and kd arguments.\n");
-        }
-    } else {
-        printf("Unknown command: %s\n", cmd);
+    
+    // Pass all commands directly to the central handler.
+    char response_buffer[512]; // Increased buffer size for help text
+    cmd_handle_command_string(cmd_line, main_motor_handle, response_buffer, sizeof(response_buffer));
+    
+    if (strlen(response_buffer) > 0) {
+        printf("%s\n", response_buffer);
     }
 }
 
