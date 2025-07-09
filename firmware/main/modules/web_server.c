@@ -74,8 +74,8 @@ static esp_err_t wifi_scan_handler(httpd_req_t *req) {
     ESP_LOGI(TAG, "Starting WiFi scan...");
     
     if (esp_wifi_scan_start(&scan_config, true) == ESP_OK) {
-        ESP_ERROR_CHECK(esp_wifi_scan_get_ap_records(&number, ap_info));
         ESP_ERROR_CHECK(esp_wifi_scan_get_ap_num(&ap_count));
+        ESP_ERROR_CHECK(esp_wifi_scan_get_ap_records(&number, ap_info));
         ESP_LOGI(TAG, "Total APs scanned: %u", ap_count);
     } else {
         ESP_LOGE(TAG, "WiFi scan failed to start.");
