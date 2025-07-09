@@ -27,6 +27,7 @@ static char mqtt_command_topic[128];
 static char mqtt_response_topic[128];
 static char mqtt_set_topic[128];
 static char mqtt_set_position_topic[128];
+static char mqtt_availability_topic[128];
 
 // Variables to hold the last known state
 static int last_position = -1;
@@ -67,6 +68,9 @@ static void publish_ha_discovery_message(void) {
     cJSON_AddStringToObject(root, "cmd_t", mqtt_set_topic);
     cJSON_AddStringToObject(root, "stat_t", state_topic);
     cJSON_AddStringToObject(root, "pos_t", position_topic);
+    cJSON_AddStringToObject(root, "avty_t", mqtt_availability_topic);
+    cJSON_AddStringToObject(root, "pl_avail", "online");
+    cJSON_AddStringToObject(root, "pl_not_avail", "offline");
     cJSON_AddStringToObject(root, "set_pos_t", mqtt_set_position_topic);
     cJSON_AddStringToObject(root, "pl_open", "OPEN");
     cJSON_AddStringToObject(root, "pl_cls", "CLOSE");
@@ -234,6 +238,11 @@ static esp_err_t mqtt_event_handler_cb(esp_mqtt_event_handle_t event) {
     switch (event->event_id) {
         case MQTT_EVENT_CONNECTED:
             ESP_LOGI(TAG, "MQTT_EVENT_CONNECTED");
+            // Publish online message to availability topic
+            if (strlen(mqtt_availability_topic) > 0) {
+                esp_mqtt_client_publish(client, mqtt_availability_topic, "online", 0, 1, true);
+                ESP_LOGI(TAG, "Published 'online' to %s", mqtt_availability_topic);
+            }
             if (strlen(mqtt_command_topic) > 0) {
                 msg_id = esp_mqtt_client_subscribe(client, mqtt_command_topic, 1);
                 ESP_LOGI(TAG, "Subscribed to %s, msg_id=%d", mqtt_command_topic, msg_id);
@@ -378,6 +387,7 @@ esp_err_t app_mqtt_start(motor_handle_t motor_handle) {
     // HA-compliant topics
     snprintf(mqtt_set_topic, sizeof(mqtt_set_topic), "%s/set", mqtt_base_topic);
     snprintf(mqtt_set_position_topic, sizeof(mqtt_set_position_topic), "%s/set_position", mqtt_base_topic);
+    snprintf(mqtt_availability_topic, sizeof(mqtt_availability_topic), "%s/availability", mqtt_base_topic);
     // Custom topics for other controls
     snprintf(mqtt_command_topic, sizeof(mqtt_command_topic), "%s/command", mqtt_base_topic);
     snprintf(mqtt_response_topic, sizeof(mqtt_response_topic), "%s/command/response", mqtt_base_topic);
@@ -394,6 +404,12 @@ esp_err_t app_mqtt_start(motor_handle_t motor_handle) {
 
     esp_mqtt_client_config_t mqtt_cfg = {
         .broker.address.uri = uri,
+        .session.last_will = {
+            .topic = mqtt_availability_topic,
+            .msg = "offline",
+            .qos = 1,
+            .retain = true,
+        },
     };
     if (strlen(mqtt_user) > 0) {
         mqtt_cfg.credentials.username = mqtt_user;
