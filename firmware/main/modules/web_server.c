@@ -149,6 +149,11 @@ static esp_err_t save_post_handler(httpd_req_t *req) {
     httpd_query_key_value(buf, "mqtt_base_topic", mqtt_base_topic, sizeof(mqtt_base_topic));
 
     // Decode URL-encoded strings
+    url_decode(ssid);
+    url_decode(pass);
+    url_decode(mqtt_server);
+    url_decode(mqtt_user);
+    url_decode(mqtt_pass);
     url_decode(mqtt_base_topic);
 
     nvs_handle_t nvs_handle;
